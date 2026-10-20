@@ -23,9 +23,11 @@ const DEFAULT_SETTINGS = {
   bank: '',
   payment: '70% mobilisation before procurement of equipment; 30% balance on completion and commissioning.',
   terms: 'Prices are in Nigerian Naira and are valid for the period stated above; equipment prices may change after that.\nEquipment carries the manufacturer\'s warranty. Workmanship warranty as agreed in writing.\nSite conditions that differ from the survey (extra cable runs, roof or civil works) may attract additional charges.',
+  invPayment: 'Payment is due by the date shown. Pay by bank transfer and send proof of payment quoting the invoice number.',
+  invTerms: 'Please quote the invoice number when making payment.\nEquipment carries the manufacturer\'s warranty. Workmanship warranty as agreed in writing.\nQueries on this invoice must be raised within 7 days of receipt.',
   labour: 10, vatPct: 7.5, valid: 14, sign: '1'
 };
-const DEFAULT_CALC = { type: 'hybrid', state: 'Lagos', psh: 4.3, derate: 0.75, invf: 1.25, days: 1, mode: 'direct', peak: 7, daily: 40, apps: [], simul: 100, inv: 'auto', bat: 'bat-li-48-314', pv: 'pv-500', run: 30, dod: '' };
+const DEFAULT_CALC = { type: 'hybrid', state: 'Lagos', psh: 4.3, derate: 0.75, invf: 1.25, days: 1, mode: 'direct', peak: 7, daily: 40, apps: [], simul: 100, inv: 'auto', bat: 'bat-li-48-314', pv: 'pv-500', run: 30, dod: '', kwhCost: 200, cover: 80, esc: 5, cost: '' };
 const S = {
   settings: Object.assign({}, DEFAULT_SETTINGS, load('settings', {})),
   prices: load('prices', {}),
@@ -40,16 +42,24 @@ const catName = c => (CATS.find(x => x[0] === c) || [c, 'Other'])[1];
 const catIdx = c => { const i = CATS.findIndex(x => x[0] === c); return i < 0 ? 99 : i; };
 
 function newQuote() {
-  return { ref: '', date: new Date().toISOString().slice(0, 10), client: { name: '', phone: '', email: '', state: S.calc.state || 'Lagos', addr: '' }, title: '', lines: [], labour: S.settings.labour, transport: 0, disc: 0, vat: 1, valid: S.settings.valid, notes: '', design: '' };
+  return { ref: '', date: new Date().toISOString().slice(0, 10), client: { name: '', phone: '', email: '', state: S.calc.state || 'Lagos', addr: '' }, title: '', lines: [], labour: S.settings.labour, transport: 0, disc: 0, vat: 1, valid: S.settings.valid, notes: '', design: '',
+    docType: 'quote', invRef: '', invDate: '', lpo: '', due: 14, paid: 0 };
 }
 S.quote = Object.assign(newQuote(), load('quote', {}));
 S.quote.client = Object.assign(newQuote().client, S.quote.client || {});
+const isoToday = () => new Date().toISOString().slice(0, 10);
+const docNo = q => (q.docType === 'invoice' ? q.invRef : q.ref) || '';
 function ensureRef() {
-  if (S.quote.ref) return;
-  const n = load('counter', 0) + 1; save('counter', n);
-  const d = new Date();
-  S.quote.ref = 'VSL/' + d.getFullYear() + '/' + String(n).padStart(4, '0');
-  save('quote', S.quote);
+  const q = S.quote, inv = q.docType === 'invoice';
+  if (docNo(q)) return;
+  const key = inv ? 'invcounter' : 'counter', n = load(key, 0) + 1; save(key, n);
+  const no = (inv ? 'INV/' : 'VSL/') + new Date().getFullYear() + '/' + String(n).padStart(4, '0');
+  if (inv) { q.invRef = no; if (!q.invDate) q.invDate = isoToday(); } else q.ref = no;
+  save('quote', q);
+}
+function fileBase() {
+  const q = S.quote, c = q.client.name ? '-' + q.client.name.replace(/[^\w]+/g, '_') : '';
+  return (q.docType === 'invoice' ? 'Invoice-' : 'Quotation-') + docNo(q).replace(/\//g, '-') + c;
 }
 
 /* ---------- tabs ---------- */
@@ -60,6 +70,7 @@ function showTab(t) {
   if (t === 'quote') renderQuote();
   if (t === 'more') renderSaved();
   if (t === 'cat') renderCatalog();
+  if (t === 'guide') renderGuide();
 }
 $$('nav.tabs button').forEach(b => b.onclick = () => showTab(b.dataset.tab));
 
@@ -200,7 +211,8 @@ function buildBOM(R, c) {
   put('fire-sign', 1);
   put('cab-conduit', Math.max(1, Math.ceil(R.pvKwp / 10)));
   put('trm-ferrule', 1);
-  put('srv-survey', 1); put('srv-design', 1); put('srv-train', 1);
+  put('srv-survey', 1); put('srv-design', 1); put('srv-comm', 1); put('srv-train', 1);
+  if (R.ongrid) put('srv-disco', 1);
   R.bom = L;
 }
 
@@ -230,6 +242,7 @@ function syncCalcInputs() {
   $('#c-typehint').textContent = TYPE_HINT[c.type];
   $('#c-state').value = c.state; $('#c-psh').value = c.psh; $('#c-derate').value = c.derate; $('#c-invf').value = c.invf; $('#c-days').value = c.days;
   $('#c-peak').value = c.peak; $('#c-daily').value = c.daily; $('#c-simul').value = c.simul; $('#c-run').value = c.run; $('#c-dod').value = c.dod;
+  $('#c-kwhcost').value = c.kwhCost; $('#c-cover').value = c.cover; $('#c-esc').value = c.esc; $('#c-cost').value = c.cost;
   $('#c-direct').hidden = c.mode !== 'direct'; $('#c-listbox').hidden = c.mode !== 'list';
   const og = c.type === 'ongrid';
   $('#c-daysW').hidden = og; $('#c-bat').closest('.f').hidden = og; $('#c-dod').closest('.f').hidden = og;
@@ -251,8 +264,10 @@ function renderCalc() {
   const c = S.calc, R = compute(c), box = $('#c-result');
   save('calc', c);
   if (c.mode === 'list') $('#c-listsum').textContent = `${f1((R.listW || 0) / 1000)} kW · ${f1(R.listE || 0)} kWh/day`;
+  $('#c-pbcard').hidden = !!R.empty;
   if (R.empty) { box.innerHTML = '<h2>Results</h2><p class="hint">Enter a peak load, daily energy and peak sun hours to see the sizing.</p>'; window._R = null; return; }
   window._R = R;
+  renderPayback(R);
   const inv = R.inv;
   $('#c-bathint').textContent = R.batChanged || (R.bat ? `Bank voltage ${inv.v}V · ${R.bat.chem} · DoD ${Math.round(R.dod * 100)}%` : '');
   const steps = [];
@@ -313,7 +328,7 @@ function bindCalc() {
   $$('#c-type button').forEach(b => b.onclick = () => { c.type = b.dataset.v; c.inv = 'auto'; syncCalcInputs(); upd(); });
   $$('#c-mode button').forEach(b => b.onclick = () => { c.mode = b.dataset.v; syncCalcInputs(); upd(); });
   $('#c-state').onchange = e => { c.state = e.target.value; c.psh = STATES[c.state][1]; $('#c-psh').value = c.psh; upd(); };
-  [['c-psh', 'psh'], ['c-derate', 'derate'], ['c-invf', 'invf'], ['c-days', 'days'], ['c-peak', 'peak'], ['c-daily', 'daily'], ['c-simul', 'simul'], ['c-run', 'run'], ['c-dod', 'dod']]
+  [['c-psh', 'psh'], ['c-derate', 'derate'], ['c-invf', 'invf'], ['c-days', 'days'], ['c-peak', 'peak'], ['c-daily', 'daily'], ['c-simul', 'simul'], ['c-run', 'run'], ['c-dod', 'dod'], ['c-kwhcost', 'kwhCost'], ['c-cover', 'cover'], ['c-esc', 'esc'], ['c-cost', 'cost']]
     .forEach(([id, k]) => $('#' + id).oninput = e => { c[k] = e.target.value; upd(); });
   $('#c-inv').onchange = e => { c.inv = e.target.value; upd(); };
   $('#c-bat').onchange = e => { c.bat = e.target.value; upd(); };
@@ -327,6 +342,75 @@ function bindCalc() {
   $('#c-apps').oninput = e => { const i = e.target.dataset.i; if (i == null) return; c.apps[i][e.target.dataset.f] = e.target.value; upd(); };
   $('#c-apps').onclick = e => { const b = e.target.closest('[data-del]'); if (!b) return; c.apps.splice(+b.dataset.del, 1); renderApps(); upd(); };
   $('#c-result').onclick = e => { if (e.target.id === 'c-mkquote') quoteFromCalc(); };
+  $('#c-pb').onclick = e => { if (e.target.id === 'c-pbnote') addPaybackNote(); };
+}
+
+/* ---------- payback estimate ---------- */
+function paybackCalc(R, c) {
+  let cost = num(c.cost);
+  if (!(cost > 0)) cost = totals({ lines: R.bom, labour: S.settings.labour, transport: ZONE_TRANSPORT[STATES[c.state][0]] || 0, disc: 0, vat: 1 }).total;
+  const s0 = R.daily * num(c.kwhCost) * 365 * (num(c.cover) / 100), g = num(c.esc) / 100;
+  const pts = [-cost]; let cum = -cost, be = null;
+  for (let y = 1; y <= 15; y++) {
+    const s = s0 * Math.pow(1 + g, y - 1), prev = cum; cum += s; pts.push(cum);
+    if (be === null && cum >= 0 && s > 0) be = y - 1 + (-prev / s);
+  }
+  return { cost, s0, pts, be };
+}
+function pbChart(pts) {
+  const W = 320, H = 160, p = { l: 6, r: 6, t: 14, b: 22 };
+  const lo = Math.min(0, ...pts), hi = Math.max(0, ...pts), span = (hi - lo) || 1;
+  const x = i => p.l + i * (W - p.l - p.r) / (pts.length - 1), y = v => p.t + (hi - v) * (H - p.t - p.b) / span;
+  const d = pts.map((v, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(v).toFixed(1)).join('');
+  const m = v => (v < 0 ? '-' : '+') + '₦' + f1(Math.abs(v) / 1e6, 1) + 'm';
+  const ticks = [0, 5, 10, 15].map(i => `<text x="${x(i).toFixed(1)}" y="${H - 6}" font-size="10" fill="#777" text-anchor="${i === 0 ? 'start' : i === 15 ? 'end' : 'middle'}">Yr ${i}</text>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Cumulative cash position over 15 years">
+    <line x1="${p.l}" x2="${W - p.r}" y1="${y(0).toFixed(1)}" y2="${y(0).toFixed(1)}" stroke="#999" stroke-dasharray="4 3"/>
+    <path d="${d}" fill="none" stroke="#C98200" stroke-width="2.5"/>
+    <text x="${p.l}" y="${p.t - 3}" font-size="10" fill="#777">${m(pts[0])} at start</text>
+    <text x="${W - p.r}" y="${p.t - 3}" font-size="10" fill="#777" text-anchor="end">${m(pts[15])} at year 15</text>${ticks}</svg>`;
+}
+function renderPayback(R) {
+  const c = S.calc, P = paybackCalc(R, c); R.pb = P;
+  const be = P.be == null ? 'Not within 15 years' : '~' + f1(P.be, 1) + ' years';
+  $('#c-pb').innerHTML = `<div class="kpis">
+      <div class="kpi"><small>System cost${num(c.cost) > 0 ? '' : ' (auto)'}</small><b>${money(P.cost)}</b></div>
+      <div class="kpi"><small>Year-1 saving</small><b>${money(P.s0)}</b></div>
+      <div class="kpi" style="grid-column:1/-1"><small>Break-even</small><b>${be}</b></div></div>
+    ${pbChart(P.pts)}
+    <div class="hint">Illustrative only: assumes savings = daily kWh × cost per kWh × share covered, growing each year with tariffs. Excludes battery replacement and maintenance. Give clients a range, not a promise.</div>
+    <div class="btns"><button class="btn sm dark" id="c-pbnote">Add payback to quote notes</button></div>`;
+}
+function addPaybackNote() {
+  const R = window._R; if (!R || !R.pb) return;
+  const P = R.pb, c = S.calc;
+  const line = `Estimated payback: ${P.be == null ? 'longer than 15 years' : 'about ' + f1(P.be, 1) + ' years'} (illustrative – assumes ${money(num(c.kwhCost))}/kWh, ${num(c.cover)}% of load covered, tariffs rising ${num(c.esc)}% a year). Actual savings depend on tariff, usage and incentives.`;
+  S.quote.notes = (S.quote.notes ? S.quote.notes + '\n' : '') + line; save('quote', S.quote); toast('Added to quote notes');
+}
+
+/* ---------- field guide ---------- */
+function renderGuide() {
+  const ck = load('checks', {});
+  const list = (items, key) => items.map((t, i) => `<label class="chk"><input type="checkbox" data-k="${key}-${i}" ${ck[key + '-' + i] ? 'checked' : ''}><span>${esc(t)}</span></label>`).join('');
+  const bul = a => '<ul class="bl">' + a.map(t => `<li>${esc(t)}</li>`).join('') + '</ul>';
+  let h = '<div class="card"><h2>Installation checklist</h2><div class="hint" style="margin-bottom:6px">Tick items as you complete them on site. Ticks are saved on this phone.</div>';
+  GUIDE.stages.forEach(s => { h += `<h3>${esc(s.t)}</h3>${list(s.items, s.id)}<div class="hint">${esc(s.note)}</div>`; });
+  h += '<h3>Grid connection &amp; metering (DisCo)</h3>' + list(GUIDE.grid, 'grid') + `<div class="hint">${esc(GUIDE.gridNote)}</div>`;
+  h += '<div class="btns"><button class="btn sm ghost danger" id="g-reset">Clear all ticks</button></div></div>';
+  h += `<div class="card" style="border-left:5px solid #c0392b"><h2>${esc(GUIDE.safety.t)}</h2>${list(GUIDE.safety.items, 'safe')}</div>`;
+  h += '<div class="card"><h2>Choose the system type</h2>' + GUIDE.types.map(t => `<p style="margin:0 0 8px"><b>${esc(t[0])}:</b> ${esc(t[1])}</p>`).join('') + `<div class="hint">${esc(GUIDE.typeTip)}</div></div>`;
+  h += `<div class="card"><h2>Sizing quick reference</h2>${bul(GUIDE.sizing)}<div class="btns"><button class="btn sm dark" data-go="calc">Open calculator</button></div></div>`;
+  h += `<div class="card"><h2>Core components</h2>${bul(GUIDE.parts)}</div>`;
+  h += `<div class="card"><h2>Monitoring &amp; maintenance</h2>${bul(GUIDE.maint)}</div>`;
+  h += `<div class="card"><h2>Common pitfalls</h2>${bul(GUIDE.pitfalls)}</div>`;
+  $('#g-body').innerHTML = h;
+}
+function bindGuide() {
+  $('#g-body').onchange = e => { const k = e.target.dataset.k; if (!k) return; const ck = load('checks', {}); if (e.target.checked) ck[k] = 1; else delete ck[k]; save('checks', ck); };
+  $('#g-body').onclick = e => {
+    if (e.target.id === 'g-reset' && confirm('Clear all checklist ticks?')) { save('checks', {}); renderGuide(); }
+    const g = e.target.closest('[data-go]'); if (g) showTab(g.dataset.go);
+  };
 }
 
 /* ======================================================================
@@ -382,7 +466,7 @@ function bindCatalog() {
    QUOTE
    ====================================================================== */
 const QF = [['q-name', 'client.name'], ['q-phone', 'client.phone'], ['q-email', 'client.email'], ['q-state', 'client.state'], ['q-addr', 'client.addr'], ['q-title', 'title'],
-['q-lab', 'labour'], ['q-trans', 'transport'], ['q-disc', 'disc'], ['q-vat', 'vat'], ['q-valid', 'valid'], ['q-notes', 'notes']];
+['q-lpo', 'lpo'], ['q-idate', 'invDate'], ['q-due', 'due'], ['q-paid', 'paid'], ['q-lab', 'labour'], ['q-trans', 'transport'], ['q-disc', 'disc'], ['q-vat', 'vat'], ['q-valid', 'valid'], ['q-notes', 'notes']];
 function totals(q) {
   let equip = 0, serv = 0;
   q.lines.forEach(l => { const a = num(l.qty) * num(l.price); if (l.cat === 'service') serv += a; else equip += a; });
@@ -394,14 +478,15 @@ function totals(q) {
 function renderLines() {
   const q = S.quote;
   $('#q-design').textContent = q.design ? 'Design: ' + q.design : '';
-  $('#q-lines').innerHTML = q.lines.length
-    ? '<tr><th>Item</th><th>Qty</th><th>Unit ₦</th><th class="n">Amount</th><th></th></tr>' + q.lines.map((l, i) => `<tr>
-      <td style="min-width:170px"><input data-i="${i}" data-f="name" value="${esc(l.name)}"></td>
-      <td style="width:64px"><input type="number" step="any" data-i="${i}" data-f="qty" value="${esc(l.qty)}" inputmode="decimal"></td>
-      <td style="width:98px"><input type="number" data-i="${i}" data-f="price" value="${esc(l.price)}" inputmode="numeric"></td>
-      <td class="n" id="q-amt-${i}" style="white-space:nowrap">${money(num(l.qty) * num(l.price))}</td>
-      <td style="width:34px"><button class="btn sm ghost danger" data-del="${i}" aria-label="Remove">✕</button></td></tr>`).join('')
-    : '<tr><td class="hint">No items yet. Build one in the Calculator tab or add from the catalogue.</td></tr>';
+  $('#q-lines').innerHTML = q.lines.length ? q.lines.map((l, i) => `<div class="ln">
+      <input class="nm" data-i="${i}" data-f="name" value="${esc(l.name)}" aria-label="Item">
+      <div class="r2">
+        <div><label>Qty</label><input type="number" step="any" data-i="${i}" data-f="qty" value="${esc(l.qty)}" inputmode="decimal"></div>
+        <div><label>Unit price ₦</label><input type="number" data-i="${i}" data-f="price" value="${esc(l.price)}" inputmode="numeric"></div>
+        <div class="am"><label>Amount</label><b id="q-amt-${i}">${money(num(l.qty) * num(l.price))}</b></div>
+        <button class="btn sm ghost danger" data-del="${i}" aria-label="Remove">✕</button>
+      </div></div>`).join('')
+    : '<p class="hint">No items yet. Build one in the Calculator tab or add from the catalogue.</p>';
 }
 function syncQuoteForm() {
   QF.forEach(([id, p]) => { $('#' + id).value = getPath(S.quote, p); });
@@ -411,9 +496,18 @@ function renderPickerResults() {
   const list = items().filter(i => !q || i.name.toLowerCase().includes(q) || catName(i.cat).toLowerCase().includes(q)).slice(0, 40);
   $('#q-presults').innerHTML = list.map(i => `<div class="item" style="cursor:pointer" data-padd="${i.id}"><div class="nm">${esc(i.name)}<small>${esc(catName(i.cat))}</small></div><b style="font-size:13px">${money(i.price)}</b><button class="btn sm dark">+</button></div>`).join('') || '<p class="hint">No match.</p>';
 }
+const W1 = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+const W2 = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+function words(n) {
+  const h = x => { let s = ''; if (x >= 100) { s += W1[Math.floor(x / 100)] + ' Hundred'; x %= 100; if (x) s += ' and '; } if (x >= 20) s += W2[Math.floor(x / 10)] + (x % 10 ? '-' + W1[x % 10] : ''); else if (x > 0) s += W1[x]; return s; };
+  if (n === 0) return 'Zero'; const u = ['', ' Thousand', ' Million', ' Billion'], out = []; let i = 0;
+  while (n > 0) { const c = n % 1000; if (c) out.unshift(h(c) + u[i]); n = Math.floor(n / 1000); i++; } return out.join(', ');
+}
+function amountWords(v) { v = Math.round(v * 100) / 100; const i = Math.floor(v), k = Math.round((v - i) * 100); return words(i) + ' Naira' + (k ? ' and ' + words(k) + ' Kobo' : '') + ' Only'; }
 function sheetHTML() {
-  const q = S.quote, s = S.settings, t = totals(q), c = q.client;
-  const until = new Date(q.date); until.setDate(until.getDate() + (num(q.valid) || 14));
+  const q = S.quote, s = S.settings, t = totals(q), c = q.client, inv = q.docType === 'invoice';
+  const base = inv ? (q.invDate || isoToday()) : q.date;
+  const until = new Date(base); until.setDate(until.getDate() + (inv ? num(q.due) : (num(q.valid) || 14)));
   const sorted = q.lines.map((l, i) => Object.assign({ i }, l)).sort((a, b) => catIdx(a.cat) - catIdx(b.cat) || a.i - b.i);
   let rows = '', last = null, n = 0;
   sorted.forEach(l => {
@@ -424,13 +518,19 @@ function sheetHTML() {
   if (!rows) rows = '<tr><td colspan="5" style="text-align:center;color:#888;padding:16px">No items added yet</td></tr>';
   const nl = x => esc(x).replace(/\n/g, '<br>');
   const tl = (lab, v, cls) => v ? `<div class="${cls || ''}"><span>${lab}</span><span>${money(v)}</span></div>` : '';
+  const paid = num(q.paid), bal = Math.max(0, t.total - paid);
+  const status = !inv ? '' : (t.total > 0 && paid >= t.total - 0.005 ? 'PAID' : paid > 0 ? 'PART PAID' : 'UNPAID');
+  const meta = inv
+    ? `<b>Invoice No:</b> ${esc(q.invRef || 'Draft')}<br><b>Date:</b> ${fmtDate(base)}<br><b>Due date:</b> ${fmtDate(until.toISOString().slice(0, 10))}${q.ref ? '<br><b>Quotation ref:</b> ' + esc(q.ref) : ''}${q.lpo ? '<br><b>LPO / PO No:</b> ' + esc(q.lpo) : ''}<br><span class="stamp st-${status.replace(' ', '')}">${status}</span>`
+    : `<b>Ref:</b> ${esc(q.ref || 'Draft')}<br><b>Date:</b> ${fmtDate(q.date)}<br><b>Valid until:</b> ${fmtDate(until.toISOString().slice(0, 10))}`;
+  const payTxt = inv ? s.invPayment : s.payment, termTxt = inv ? s.invTerms : s.terms;
   return `
-  <div class="lh"><img src="img/logo-full.png" alt="Viensco Synergy Ltd">
+  <div class="lh"><img src="${IMG.logo}" alt="Viensco Synergy Ltd">
     <div class="co"><h1>${esc(s.company)}</h1><div class="tag">GREAT WITH QUALITY</div><div style="margin-top:4px;color:#555">Solar &amp; energy solutions</div>${s.address ? `<div style="color:#555">${esc(s.address)}</div>` : ''}</div>
     <div class="ct">✉ ${esc(s.email)}<br>☎ ${esc(s.phone)}<br>WhatsApp ${esc(s.whatsapp)}</div></div>
-  <div class="ttl"><h2>QUOTATION</h2><div class="meta"><b>Ref:</b> ${esc(q.ref || 'Draft')}<br><b>Date:</b> ${fmtDate(q.date)}<br><b>Valid until:</b> ${fmtDate(until)}</div></div>
+  <div class="ttl"><h2>${inv ? 'INVOICE' : 'QUOTATION'}</h2><div class="meta">${meta}</div></div>
   <div class="two">
-    <div><b>Prepared for</b>${esc(c.name || '—')}${c.phone ? '<br>' + esc(c.phone) : ''}${c.email ? '<br>' + esc(c.email) : ''}${c.addr ? '<br>' + esc(c.addr) : ''}${c.state ? '<br>' + esc(c.state) + ' State' : ''}</div>
+    <div><b>${inv ? 'Bill to' : 'Prepared for'}</b>${esc(c.name || '—')}${c.phone ? '<br>' + esc(c.phone) : ''}${c.email ? '<br>' + esc(c.email) : ''}${c.addr ? '<br>' + esc(c.addr) : ''}${c.state ? '<br>' + esc(c.state) + ' State' : ''}</div>
     <div><b>Project</b>${esc(q.title || 'Solar power system')}${q.design ? '<br><span style="color:#555">' + esc(q.design) + '</span>' : ''}</div>
   </div>
   <table><tr><th style="width:26px">#</th><th>Description</th><th class="r">Qty</th><th class="r">Unit price</th><th class="r">Amount</th></tr>${rows}</table>
@@ -438,21 +538,30 @@ function sheetHTML() {
     ${tl('Equipment &amp; materials', t.equip)}${tl('Services (survey, design, training)', t.serv)}${tl('Installation labour (' + f1(num(q.labour), 1) + '%)', t.lab)}${tl('Transport &amp; logistics', t.trans)}
     ${tl('Sub-total', t.sub)}${t.disc ? tl('Discount (' + f1(num(q.disc), 1) + '%)', -t.disc).replace('₦-', '-₦') : ''}${num(q.vat) ? tl('VAT (' + f1(num(s.vatPct), 1) + '%)', t.vat) : ''}
     <div class="gt"><span>TOTAL</span><span>${money(t.total)}</span></div>
+    ${inv && paid > 0 ? `<div><span>Amount paid</span><span>${money(paid)}</span></div><div class="gt bal"><span>BALANCE DUE</span><span>${money(bal)}</span></div>` : ''}
   </div>
+  ${inv ? `<div class="words"><b>Amount in words:</b> ${esc(amountWords(paid > 0 ? bal : t.total))}</div>` : ''}
   <div class="terms">
-    ${s.payment ? `<h4>Payment terms</h4>${nl(s.payment)}` : ''}
-    ${s.bank ? `<h4>Bank details</h4>${nl(s.bank)}` : ''}
-    ${s.terms ? `<h4>Terms &amp; conditions</h4>${nl(s.terms)}` : ''}
+    ${payTxt ? `<h4>Payment terms</h4>${nl(payTxt)}` : ''}
+    ${s.bank ? `<h4>${inv ? 'Pay to (bank details)' : 'Bank details'}</h4>${nl(s.bank)}` : ''}
+    ${termTxt ? `<h4>Terms &amp; conditions</h4>${nl(termTxt)}` : ''}
     ${q.notes ? `<h4>Notes</h4>${nl(q.notes)}` : ''}
   </div>
   <div class="sign">
-    <div>${s.sign === '1' ? '<img src="img/signature.png" alt="">' : '<div style="height:52px"></div>'}<div class="ln">For ${esc(s.company)}</div></div>
-    <div><div style="height:52px"></div><div class="ln">Client acceptance (sign &amp; date)</div></div>
+    <div>${s.sign === '1' ? `<img src="${IMG.sign}" alt="">` : '<div style="height:52px"></div>'}<div class="ln">${inv ? 'Authorised signature – ' : 'For '}${esc(s.company)}</div></div>
+    <div><div style="height:52px"></div><div class="ln">${inv ? 'Customer acknowledgement (sign &amp; date)' : 'Client acceptance (sign &amp; date)'}</div></div>
   </div>
   <div class="foot">${esc(s.company)} · ${esc(s.email)} · ${esc(s.phone)} · Great with Quality</div>`;
 }
 function renderSheet() { $('#sheet').innerHTML = sheetHTML(); }
-function renderQuote() { syncQuoteForm(); renderLines(); renderSheet(); }
+function syncType() {
+  const inv = S.quote.docType === 'invoice';
+  $$('#q-type button').forEach(b => b.classList.toggle('on', b.dataset.v === S.quote.docType));
+  $('#q-formtitle').textContent = inv ? 'Client & invoice' : 'Client & quotation';
+  $('#q-inv').hidden = !inv; $('#q-valid').closest('.f').hidden = inv;
+  $('#q-no').textContent = docNo(S.quote) ? (inv ? 'Invoice ' : 'Quotation ') + docNo(S.quote) : '';
+}
+function renderQuote() { syncType(); syncQuoteForm(); renderLines(); renderSheet(); }
 function changed() { save('quote', S.quote); renderSheet(); }
 function bindQuote() {
   QF.forEach(([id, p]) => {
@@ -477,37 +586,61 @@ function bindQuote() {
   $('#q-psearch').oninput = renderPickerResults;
   $('#q-presults').onclick = e => { const r = e.target.closest('[data-padd]'); if (!r) return; addLine(getItem(r.dataset.padd)); renderLines(); changed(); };
   $('#q-custom').onclick = () => { S.quote.lines.push({ id: 'c' + Date.now(), cat: 'other', name: 'Custom item', unit: 'pc', qty: 1, price: 0 }); renderLines(); changed(); };
+  $$('#q-type button').forEach(b => b.onclick = () => {
+    S.quote.docType = b.dataset.v; if (b.dataset.v === 'invoice' && !S.quote.invDate) S.quote.invDate = isoToday();
+    save('quote', S.quote); renderQuote();
+  });
   $('#q-print').onclick = () => {
-    ensureRef(); renderSheet();
-    const old = document.title; document.title = 'Quotation ' + S.quote.ref.replace(/\//g, '-') + (S.quote.client.name ? ' - ' + S.quote.client.name : '');
+    ensureRef(); renderQuote();
+    const old = document.title; document.title = fileBase();
     window.onafterprint = () => { document.title = old; window.onafterprint = null; };
     setTimeout(() => window.print(), 150);
+  };
+  async function exportDoc(kind) {
+    ensureRef(); renderQuote();
+    const btns = $$('#q-pdf,#q-img,#q-share'); btns.forEach(b => b.disabled = true);
+    toast('Preparing ' + (kind === 'png' ? 'image' : 'PDF') + '…');
+    try {
+      const el = $('#sheet'), name = fileBase() + (kind === 'png' ? '.png' : '.pdf');
+      const blob = kind === 'png' ? await VExport.png(el) : await VExport.pdf(el);
+      if (kind === 'share') return;
+      VExport.save(blob, name); toast('Saved ' + name);
+    } catch (e) { toast('Export is not supported here – use Print, then Save as PDF'); }
+    finally { btns.forEach(b => b.disabled = false); }
+  }
+  $('#q-pdf').onclick = () => exportDoc('pdf');
+  $('#q-img').onclick = () => exportDoc('png');
+  $('#q-share').onclick = async () => {
+    ensureRef(); renderQuote(); const btns = $$('#q-pdf,#q-img,#q-share'); btns.forEach(b => b.disabled = true); toast('Preparing PDF…');
+    try { const name = fileBase() + '.pdf', blob = await VExport.pdf($('#sheet')); const shared = await VExport.share(blob, name, name); if (!shared) toast('Sharing not available – PDF downloaded instead'); }
+    catch (e) { toast('Could not share – use Download PDF'); } finally { btns.forEach(b => b.disabled = false); }
   };
   $('#q-save').onclick = () => {
     ensureRef();
     const copy = JSON.parse(JSON.stringify(S.quote)); copy.saved = Date.now();
-    const i = S.saved.findIndex(x => x.ref === copy.ref);
+    const key = x => (x.docType || 'quote') + '|' + docNo(x);
+    const i = S.saved.findIndex(x => key(x) === key(copy));
     if (i >= 0) S.saved[i] = copy; else S.saved.unshift(copy);
-    save('saved', S.saved); renderSheet(); toast('Saved as ' + copy.ref);
+    save('saved', S.saved); renderQuote(); toast('Saved as ' + docNo(copy));
   };
   $('#q-wa').onclick = () => {
-    ensureRef(); renderSheet();
-    const t = totals(S.quote), c = S.quote.client;
+    ensureRef(); renderQuote();
+    const t = totals(S.quote), c = S.quote.client, inv = S.quote.docType === 'invoice', bal = Math.max(0, t.total - num(S.quote.paid));
     let p = (c.phone || '').replace(/[^\d]/g, ''); if (p.startsWith('0')) p = '234' + p.slice(1);
-    const msg = `Hello ${c.name || ''},\n\nQuotation ${S.quote.ref} from ${S.settings.company}\n${S.quote.title || 'Solar power system'}${S.quote.design ? '\n' + S.quote.design : ''}\nTotal: ${money(t.total)}${num(S.quote.vat) ? ' (VAT incl.)' : ''}\n\nGreat with Quality.`;
+    const msg = `Hello ${c.name || ''},\n\n${inv ? 'Invoice' : 'Quotation'} ${docNo(S.quote)} from ${S.settings.company}\n${S.quote.title || 'Solar power system'}${S.quote.design ? '\n' + S.quote.design : ''}\n${inv ? 'Amount due: ' + money(bal) : 'Total: ' + money(t.total) + (num(S.quote.vat) ? ' (VAT incl.)' : '')}\n\nGreat with Quality.`;
     window.open('https://wa.me/' + p + '?text=' + encodeURIComponent(msg), '_blank');
-    toast('Tip: use Save as PDF first, then attach it in WhatsApp');
+    toast('Tip: tap Share to send the PDF itself');
   };
-  $('#q-new').onclick = () => { if (!confirm('Start a new blank quote? Unsaved changes will be lost.')) return; S.quote = newQuote(); save('quote', S.quote); renderQuote(); window.scrollTo(0, 0); };
+  $('#q-new').onclick = () => { if (!confirm('Start a new blank document? Unsaved changes will be lost.')) return; S.quote = newQuote(); save('quote', S.quote); renderQuote(); window.scrollTo(0, 0); };
 }
 
 /* ======================================================================
    MORE: saved quotes, settings, price tools
    ====================================================================== */
 function renderSaved() {
-  $('#m-saved').innerHTML = S.saved.length ? S.saved.map((x, i) => `<div class="item"><div class="nm"><b>${esc(x.ref)}</b> – ${esc(x.client.name || 'No name')}<small>${fmtDate(x.date)} · ${money(totals(x).total)}</small></div>
+  $('#m-saved').innerHTML = S.saved.length ? S.saved.map((x, i) => `<div class="item"><div class="nm"><b>${esc(docNo(x))}</b> <span class="tag">${x.docType === 'invoice' ? 'Invoice' : 'Quote'}</span> – ${esc(x.client.name || 'No name')}<small>${fmtDate(x.date)} · ${money(totals(x).total)}</small></div>
     <button class="btn sm dark" data-open="${i}">Open</button><button class="btn sm ghost danger" data-rm="${i}" aria-label="Delete">✕</button></div>`).join('')
-    : '<p class="hint">No saved quotes yet. Tap "Save quote" on the Quote tab.</p>';
+    : '<p class="hint">Nothing saved yet. Tap "Save" on the Quote tab.</p>';
 }
 function bindMore() {
   $$('[data-s]').forEach(el => {
@@ -516,7 +649,7 @@ function bindMore() {
   });
   $('#m-saved').onclick = e => {
     const o = e.target.closest('[data-open]'), r = e.target.closest('[data-rm]');
-    if (o) { S.quote = Object.assign(newQuote(), JSON.parse(JSON.stringify(S.saved[+o.dataset.open]))); save('quote', S.quote); showTab('quote'); toast('Quote opened'); }
+    if (o) { S.quote = Object.assign(newQuote(), JSON.parse(JSON.stringify(S.saved[+o.dataset.open]))); save('quote', S.quote); showTab('quote'); toast((S.quote.docType === 'invoice' ? 'Invoice' : 'Quote') + ' opened'); }
     if (r && confirm('Delete this saved quote?')) { S.saved.splice(+r.dataset.rm, 1); save('saved', S.saved); renderSaved(); }
   };
   $('#m-apply').onclick = () => {
@@ -534,17 +667,32 @@ function bindMore() {
 let deferred = null;
 const standalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+const isAndroid = /android/i.test(navigator.userAgent);
 function installHelp() {
   const m = $('#m-install'), b = $('#m-installBtn');
-  if (standalone()) { m.textContent = 'Viensco Solar is installed on this device and works offline.'; b.hidden = true; return; }
-  if (isIOS) { m.textContent = 'On iPhone/iPad: tap the Share icon in Safari, then "Add to Home Screen".'; b.hidden = true; return; }
-  m.textContent = deferred ? 'Install the app for one-tap access and full offline use.' : 'Open the browser menu and choose "Install app" or "Add to Home screen".';
-  b.hidden = !deferred;
+  if (standalone()) { m.textContent = 'Viensco Solar is installed on this device and works offline.'; b.hidden = true; }
+  else if (location.protocol === 'file:') { m.textContent = 'This copy was opened from a file, so it cannot be installed. Open the app from its https:// web link (for example your GitHub Pages address), then install it.'; b.hidden = true; }
+  else if (isIOS) { m.textContent = 'On iPhone/iPad: open this page in Safari, tap the Share icon, then "Add to Home Screen".'; b.hidden = true; }
+  else if (deferred) { m.textContent = 'Install the app for one-tap access, its own window and full offline use.'; b.hidden = false; }
+  else { b.hidden = true; m.textContent = isAndroid ? 'Open the browser menu (⋮) and choose "Install app" or "Add to Home screen".' : 'On a PC: in Chrome or Edge click the install icon (⊕) at the right end of the address bar, or open the menu and choose "Install Viensco Solar". On a Mac with Safari: File → Add to Dock.'; }
+  diag();
+}
+async function diag() {
+  const box = $('#m-diag'); if (!box) return;
+  const ok = (v, t, tip) => `<div>${v ? '✔' : '✘'} ${t}${!v && tip ? ` <span style="color:#c0392b">– ${tip}</span>` : ''}</div>`;
+  const secure = location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(location.hostname);
+  let man = false, sw = false, cached = false;
+  try { const l = document.querySelector('link[rel=manifest]'); man = !!l && (await fetch(l.href)).ok; } catch (e) { }
+  try { const r = await navigator.serviceWorker.getRegistration(); sw = !!(r && (r.active || r.waiting || r.installing)); } catch (e) { }
+  try { cached = (await caches.keys()).length > 0; } catch (e) { }
+  box.innerHTML = '<b>Install check</b>' + ok(secure, 'Opened from a secure (https) link', 'use your https:// GitHub Pages link') + ok(man, 'App manifest found', 'upload manifest.webmanifest') +
+    ok(sw, 'Offline service worker running', 'upload sw.js, then reload the page') + ok(cached, 'Files saved for offline use', 'open once while online and wait a few seconds') + ok(standalone(), 'Running as an installed app', '');
 }
 function showInstallBar() {
   if (standalone()) return;
   const dismissed = load('installDismissed', 0);
   if (Date.now() - dismissed < 3 * 864e5) return;
+  if (location.protocol === 'file:') return;
   if (isIOS) { $('#installMsg').textContent = 'Install on iPhone: tap Share, then "Add to Home Screen".'; $('#installBtn').hidden = true; }
   else if (!deferred) return;
   $('#installBar').hidden = false;
@@ -560,13 +708,14 @@ window.addEventListener('online', () => { netState(); toast('Back online'); });
 window.addEventListener('offline', () => { netState(); toast('Offline – the app keeps working'); });
 
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').then(() => { }).catch(() => { }));
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').then(() => setTimeout(diag, 1500)).catch(() => { }));
 }
 
 /* ---------- boot ---------- */
 fillCalcSelects();
 syncCalcInputs();
-bindCalc(); bindCatalog(); bindQuote(); bindMore();
+bindCalc(); bindGuide(); bindCatalog(); bindQuote(); bindMore();
 renderCalc(); renderCatalog(); renderQuote(); renderSaved();
 netState(); installHelp(); setTimeout(showInstallBar, 1500);
 setTimeout(() => $('#splash').classList.add('gone'), 1100);
+{ const h = location.hash.slice(1); if (['calc', 'cat', 'quote', 'guide', 'more'].includes(h)) showTab(h); }
